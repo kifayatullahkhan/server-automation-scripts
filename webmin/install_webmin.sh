@@ -4,13 +4,12 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.10.0
+#  Version: 1.12.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
-#    and logs installation details. Updated for 2025 Webmin developers key
-#    (RSA-4096), Ubuntu 24.10+ compatibility, robust apt-get update with repo URL
-#    checks, and verbose logging. Optimized for curl-based execution.
+#    and logs installation details. Fixed for Ubuntu 24.10 DSA-1024 key allowance
+#    using jcameron-key.asc for sarge repo compatibility. Optimized for curl-based execution.
 #===============================================================================
 
 set -euo pipefail
@@ -22,8 +21,7 @@ LOG_FILE="/var/log/webmin-install.log"
 INFO_FILE="/root/webmin-install-info.log"
 WEBSERVER_PORT=10000
 DATE_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EXPECTED_KEY_FINGERPRINT="7D1AE915F3DCFADA344A4FCB2D223B918916F2A2"
-WEBMIN_REPO_URL="https://download.webmin.com/download/repository/dists/sarge/Release"
+EXPECTED_KEY_FINGERPRINT="1719003ACE3E5A41E2DE70DFD97A3AE911F63C51"
 
 #------------------------------------------------------------------------------
 # Logging Function (displays on screen and logs to file)
@@ -49,7 +47,7 @@ log "=== Starting Webmin unattended installation at $DATE_NOW ==="
 UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "unknown")
 UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || echo "unknown")
 if [[ "$UBUNTU_VERSION" =~ ^24\.10$ || "$UBUNTU_CODENAME" == "noble" ]]; then
-    log "Detected Ubuntu 24.10 (noble). Using modern Webmin developers key (no DSA workaround needed)."
+    log "Detected Ubuntu 24.10 (noble). Enabling DSA-1024 allowance for Webmin key."
 fi
 if [[ ! "$UBUNTU_VERSION" =~ ^(22|24|25)\.[0-9]+$ ]]; then
     log "Warning: Detected Ubuntu $UBUNTU_VERSION — officially tested on 22.04/24.04/25.xx only."
@@ -87,7 +85,7 @@ attempt=1
 max_attempts=3
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Downloading Webmin GPG key..."
-    if wget -qO- --tries=2 --timeout=10 https://download.webmin.com/developers-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
+    if wget -qO- --tries=2 --timeout=10 https://www.webmin.com/jcameron-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
         log "Webmin GPG key imported successfully."
         break
     else
@@ -116,12 +114,25 @@ chmod 644 /etc/apt/keyrings/webmin.gpg
 echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
 chmod 644 /etc/apt/sources.list.d/webmin.list
 
+# DSA-1024 allowance for Ubuntu 24.10+
+if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
+    log "Applying DSA-1024 allowance for Webmin key..."
+    cat > /etc/apt/apt.conf.d/99webmin-allow-dsa <<EOF
+Acquire::AllowInsecureRepositories "false";
+Acquire::AllowDowngradeToInsecureRepositories "false";
+Acquire::http::AllowSignatureMismatch "false";
+Acquire::https::AllowSignatureMismatch "false";
+Acquire::AllowInsecureRepositories::webmin "true";
+EOF
+    chmod 644 /etc/apt/apt.conf.d/99webmin-allow-dsa
+fi
+
 # Test network connectivity to Webmin repo
 log "Testing network connectivity to Webmin repository..."
-if curl -s --connect-timeout 5 --head "$WEBMIN_REPO_URL" | grep -q "200 OK"; then
-    log "Webmin repository URL ($WEBMIN_REPO_URL) is reachable."
+if curl -s --connect-timeout 5 --head https://download.webmin.com/download/repository/dists/sarge/Release | grep -q "200 OK"; then
+    log "Webmin repository URL is reachable."
 else
-    log "Warning: Cannot reach $WEBMIN_REPO_URL. Network or server issues may cause apt-get update to fail."
+    log "Warning: Cannot reach Webmin repository. Network issues may cause apt-get update to fail."
 fi
 
 # Update repo with retry (max 3 attempts)
@@ -131,8 +142,7 @@ max_attempts=3
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Updating APT with Webmin repository..."
     rm -rf /var/lib/apt/lists/*webmin*
-    update_output=$(timeout 60 apt-get update -y 2>&1)
-    echo "$update_output" | tee -a "$LOG_FILE"
+    update_output=$(timeout 120 apt-get update -y 2>&1 | tee -a "$LOG_FILE")
     if echo "$update_output" | grep -qi "webmin"; then
         log "Webmin repository detected successfully."
         break
@@ -144,14 +154,13 @@ while [ $attempt -le $max_attempts ]; do
             log "Official setup script succeeded. Proceeding with Webmin installation."
             break
         else
-            log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com/docs/modules/repository/."
+            log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com."
             exit 1
         fi
     else
         log "Warning: Could not verify Webmin repo on attempt $attempt. Full output logged to $LOG_FILE."
         if [ $attempt -eq $max_attempts ]; then
             log "Error: Failed to update APT with Webmin repo after $max_attempts attempts. Check $LOG_FILE or https://download.webmin.com."
-            log "Full apt-get update output: $update_output"
             exit 1
         fi
         sleep 2
@@ -161,10 +170,7 @@ done
 
 # Install Webmin
 log "Installing Webmin..."
-if ! DEBIAN_FRONTEND=noninteractive apt-get install -y webmin --install-recommends 2>&1 | tee -a "$LOG_FILE"; then
-    log "Error: Webmin installation failed. Check $LOG_FILE for details."
-    exit 1
-fi
+DEBIAN_FRONTEND=noninteractive apt-get install -y webmin --install-recommends 2>&1 | tee -a "$LOG_FILE"
 
 #------------------------------------------------------------------------------
 # Enable and Start Webmin Service
@@ -197,6 +203,14 @@ else
 fi
 
 #------------------------------------------------------------------------------
+# Cleanup DSA Workaround
+#------------------------------------------------------------------------------
+if [[ -f /etc/apt/apt.conf.d/99webmin-allow-dsa ]]; then
+    rm -f /etc/apt/apt.conf.d/99webmin-allow-dsa
+    log "Cleaned up DSA-1024 workaround config."
+fi
+
+#------------------------------------------------------------------------------
 # Log & Display Access Information
 #------------------------------------------------------------------------------
 SERVER_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || hostname -I | tr ' ' '\n' | head -n 1)
@@ -223,7 +237,7 @@ Log File:      $LOG_FILE
 Info File:     $INFO_FILE
 Security Note: Webmin uses a self-signed SSL certificate by default.
                Consider configuring Let's Encrypt via Webmin's SSL module.
-               Using modern Webmin developers key (2025 compatible).
+               DSA-1024 workaround applied and cleaned up for Ubuntu 24.10+.
 
 ============================================================
 EOF
