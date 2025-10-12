@@ -4,12 +4,12 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.6.0
+#  Version: 1.7.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
-#    and logs installation details. Fixed DSA-1024 weak key issue on Ubuntu 24.10+
-#    with cleanup and reordered key/repo setup for curl-based execution.
+#    and logs installation details. Updated for 2025 Webmin developers key
+#    (RSA-4096) and Ubuntu 24.10+ compatibility. Optimized for curl-based execution.
 #===============================================================================
 
 set -euo pipefail
@@ -21,7 +21,7 @@ LOG_FILE="/var/log/webmin-install.log"
 INFO_FILE="/root/webmin-install-info.log"
 WEBSERVER_PORT=10000
 DATE_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EXPECTED_KEY_FINGERPRINT="1719003ACE3E5A41E2DE70DFD97A3AE911F63C51"
+EXPECTED_KEY_FINGERPRINT="7D1AE915F3DCFADA344A4FCB2D223B918916F2A2"
 
 #------------------------------------------------------------------------------
 # Logging Function (displays on screen and logs to file)
@@ -47,7 +47,7 @@ log "=== Starting Webmin unattended installation at $DATE_NOW ==="
 UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "unknown")
 UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || echo "unknown")
 if [[ "$UBUNTU_VERSION" =~ ^24\.10$ || "$UBUNTU_CODENAME" == "noble" ]]; then
-    log "Detected Ubuntu 24.10 (noble). Enabling DSA-1024 workaround for Webmin key."
+    log "Detected Ubuntu 24.10 (noble). Using modern Webmin developers key (no DSA workaround needed)."
 fi
 if [[ ! "$UBUNTU_VERSION" =~ ^(22|24|25)\.[0-9]+$ ]]; then
     log "Warning: Detected Ubuntu $UBUNTU_VERSION — officially tested on 22.04/24.04/25.xx only."
@@ -109,15 +109,6 @@ log "GPG key fingerprint verified: $KEY_FINGERPRINT"
 # Set secure permissions for keyring
 chmod 644 /etc/apt/keyrings/webmin.gpg
 
-# Apply DSA-1024 workaround for Ubuntu 24.10+
-if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
-    log "Applying DSA-1024 allowance for Webmin key..."
-    cat > /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf <<EOF
-APT::Key::Assert-Pubkey-Algo "dsa1024=$EXPECTED_KEY_FINGERPRINT";
-EOF
-    chmod 644 /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
-fi
-
 # Create Webmin APT source list (after key import)
 echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
 chmod 644 /etc/apt/sources.list.d/webmin.list
@@ -128,10 +119,10 @@ update_output=$(apt-get update -y 2>&1 | tee -a "$LOG_FILE")
 if echo "$update_output" | grep -q "webmin.*Hit\|Get.*webmin"; then
     log "Webmin repository detected successfully."
 elif echo "$update_output" | grep -iq "NO_PUBKEY\|signature.*invalid\|not signed"; then
-    log "Error: GPG verification failed even with workaround. Falling back to official Webmin setup script..."
+    log "Error: GPG verification failed. Falling back to official Webmin setup script..."
     # Fallback: Use official Webmin setup script
     cd /tmp
-    if wget -q https://raw.githubusercontent.com/webmin/webmin/master/setup-repos.sh && sh setup-repos.sh -y; then
+    if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh -y; then
         log "Official setup script succeeded. Proceeding with Webmin installation."
     else
         log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com/docs/modules/repository/."
@@ -179,14 +170,6 @@ else
 fi
 
 #------------------------------------------------------------------------------
-# Cleanup (Remove DSA Workaround if Applied)
-#------------------------------------------------------------------------------
-if [[ -f /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf ]]; then
-    rm -f /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
-    log "Cleaned up DSA-1024 workaround config."
-fi
-
-#------------------------------------------------------------------------------
 # Log & Display Access Information
 #------------------------------------------------------------------------------
 SERVER_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || hostname -I | tr ' ' '\n' | head -n 1)
@@ -213,7 +196,7 @@ Log File:      $LOG_FILE
 Info File:     $INFO_FILE
 Security Note: Webmin uses a self-signed SSL certificate by default.
                Consider configuring Let's Encrypt via Webmin's SSL module.
-               DSA-1024 workaround applied and cleaned up for Ubuntu 24.10+.
+               Using modern Webmin developers key (2025 compatible).
 
 ============================================================
 EOF
