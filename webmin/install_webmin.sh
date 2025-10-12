@@ -4,13 +4,13 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.8.0
+#  Version: 1.9.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
 #    and logs installation details. Updated for 2025 Webmin developers key
-#    (RSA-4096), Ubuntu 24.10+ compatibility, and robust apt-get update handling.
-#    Optimized for curl-based execution with real-time output.
+#    (RSA-4096), Ubuntu 24.10+ compatibility, robust apt-get update with network
+#    checks, and verbose logging. Optimized for curl-based execution.
 #===============================================================================
 
 set -euo pipefail
@@ -115,16 +115,24 @@ chmod 644 /etc/apt/keyrings/webmin.gpg
 echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
 chmod 644 /etc/apt/sources.list.d/webmin.list
 
+# Test network connectivity to Webmin repo
+log "Testing network connectivity to Webmin repository..."
+if ! curl -s --connect-timeout 5 https://download.webmin.com/download/repository >/dev/null; then
+    log "Warning: Cannot reach https://download.webmin.com. Network issues may cause apt-get update to fail."
+fi
+
 # Update repo with retry (max 3 attempts)
 log "Running apt-get update for Webmin repository..."
 attempt=1
 max_attempts=3
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Updating APT with Webmin repository..."
-    if timeout 60 apt-get update -y 2>&1 | tee -a "$LOG_FILE" | grep -q "webmin.*Hit\|Get.*webmin"; then
+    rm -rf /var/lib/apt/lists/*webmin*
+    update_output=$(timeout 60 apt-get update -y 2>&1 | tee -a "$LOG_FILE")
+    if echo "$update_output" | grep -qi "webmin"; then
         log "Webmin repository detected successfully."
         break
-    elif timeout 60 apt-get update -y 2>&1 | tee -a "$LOG_FILE" | grep -iq "NO_PUBKEY\|signature.*invalid\|not signed"; then
+    elif echo "$update_output" | grep -qi "NO_PUBKEY\|signature.*invalid\|not signed"; then
         log "Error: GPG verification failed. Falling back to official Webmin setup script..."
         cd /tmp
         if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
@@ -135,12 +143,12 @@ while [ $attempt -le $max_attempts ]; do
             exit 1
         fi
     else
-        log "Warning: Could not verify Webmin repo on attempt $attempt."
+        log "Warning: Could not verify Webmin repo on attempt $attempt. Full output logged to $LOG_FILE."
         if [ $attempt -eq $max_attempts ]; then
             log "Error: Failed to update APT with Webmin repo after $max_attempts attempts. Check network or https://download.webmin.com."
+            log "Full apt-get update output: $update_output"
             exit 1
         fi
-        rm -rf /var/lib/apt/lists/*webmin*
         sleep 2
     fi
     ((attempt++))
