@@ -4,11 +4,12 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.2.0
+#  Version: 1.4.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
-#    and logs installation details. Updated for 2025 Webmin key and compatibility.
+#    and logs installation details. Optimized for curl-based execution with
+#    real-time terminal output for debugging.
 #===============================================================================
 
 set -euo pipefail
@@ -22,7 +23,7 @@ WEBSERVER_PORT=10000
 DATE_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 #------------------------------------------------------------------------------
-# Logging Function
+# Logging Function (displays on screen and logs to file)
 #------------------------------------------------------------------------------
 log() {
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $1" | tee -a "$LOG_FILE"
@@ -42,7 +43,7 @@ log "=== Starting Webmin unattended installation at $DATE_NOW ==="
 #------------------------------------------------------------------------------
 # Detect Ubuntu Version
 #------------------------------------------------------------------------------
-UBUNTU_VERSION=$(lsb_release -rs)
+UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "unknown")
 if [[ ! "$UBUNTU_VERSION" =~ ^(22|24|25)\.[0-9]+$ ]]; then
     log "Warning: Detected Ubuntu $UBUNTU_VERSION — officially tested on 22.04/24.04/25.xx LTS only."
 fi
@@ -51,11 +52,11 @@ fi
 # Install Prerequisites
 #------------------------------------------------------------------------------
 log "Installing prerequisite packages..."
-apt-get update -y >>"$LOG_FILE" 2>&1
-apt-get install -y apt-transport-https software-properties-common curl wget gpg >>"$LOG_FILE" 2>&1
+apt-get update -y 2>&1 | tee -a "$LOG_FILE"
+apt-get install -y apt-transport-https software-properties-common curl wget gpg perl libnet-ssleay-perl 2>&1 | tee -a "$LOG_FILE"
 
 # Optional: Skip full system upgrade to avoid unintended changes (uncomment to enable)
-# apt-get upgrade -y >>"$LOG_FILE" 2>&1
+# apt-get upgrade -y 2>&1 | tee -a "$LOG_FILE"
 
 #------------------------------------------------------------------------------
 # Add Webmin Repository (Secure Key Handling)
@@ -65,11 +66,28 @@ log "Adding Webmin GPG key and repository..."
 mkdir -p /etc/apt/keyrings
 chmod 755 /etc/apt/keyrings
 
-# Download and convert Webmin GPG key to keyring format (using current developers key over HTTPS)
-if wget -qO- https://download.webmin.com/developers-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
-    log "Webmin GPG key imported successfully."
-else
-    log "Error: Failed to import Webmin GPG key from https://download.webmin.com/developers-key.asc."
+# Download and convert Webmin GPG key with retry (max 3 attempts)
+attempt=1
+max_attempts=3
+while [ $attempt -le $max_attempts ]; do
+    log "Attempt $attempt of $max_attempts: Downloading Webmin GPG key..."
+    if wget -qO- --tries=2 --timeout=10 https://download.webmin.com/developers-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
+        log "Webmin GPG key imported successfully."
+        break
+    else
+        log "Warning: Failed to download GPG key."
+        if [ $attempt -eq $max_attempts ]; then
+            log "Error: Failed to import Webmin GPG key after $max_attempts attempts. Check network or URL https://download.webmin.com/developers-key.asc."
+            exit 1
+        fi
+        sleep 2
+    fi
+    ((attempt++))
+done
+
+# Verify GPG key import
+if [ ! -s /etc/apt/keyrings/webmin.gpg ]; then
+    log "Error: Webmin GPG key file is empty or missing."
     exit 1
 fi
 
@@ -94,14 +112,17 @@ fi
 
 # Install Webmin
 log "Installing Webmin..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y webmin >>"$LOG_FILE" 2>&1
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y webmin --install-recommends 2>&1 | tee -a "$LOG_FILE"; then
+    log "Error: Webmin installation failed. Check $LOG_FILE for details."
+    exit 1
+fi
 
 #------------------------------------------------------------------------------
 # Enable and Start Webmin Service
 #------------------------------------------------------------------------------
 log "Enabling and starting Webmin service..."
-systemctl enable webmin >>"$LOG_FILE" 2>&1
-systemctl restart webmin >>"$LOG_FILE" 2>&1
+systemctl enable webmin 2>&1 | tee -a "$LOG_FILE"
+systemctl restart webmin 2>&1 | tee -a "$LOG_FILE"
 if systemctl is-active --quiet webmin; then
     log "Webmin service started successfully."
 else
@@ -115,12 +136,12 @@ fi
 log "Configuring firewall..."
 if command -v ufw >/dev/null 2>&1; then
     log "Configuring UFW firewall..."
-    ufw allow "$WEBSERVER_PORT"/tcp >>"$LOG_FILE" 2>&1
-    ufw reload >>"$LOG_FILE" 2>&1 || true
+    ufw allow "$WEBSERVER_PORT"/tcp 2>&1 | tee -a "$LOG_FILE"
+    ufw reload 2>&1 | tee -a "$LOG_FILE" || true
 elif command -v firewall-cmd >/dev/null 2>&1; then
     log "Configuring firewalld..."
-    firewall-cmd --permanent --add-port="$WEBSERVER_PORT"/tcp >>"$LOG_FILE" 2>&1
-    firewall-cmd --reload >>"$LOG_FILE" 2>&1
+    firewall-cmd --permanent --add-port="$WEBSERVER_PORT"/tcp 2>&1 | tee -a "$LOG_FILE"
+    firewall-cmd --reload 2>&1 | tee -a "$LOG_FILE"
 else
     log "No supported firewall (UFW or firewalld) detected; skipping configuration."
     log "Warning: Ensure port $WEBSERVER_PORT/tcp is open manually if a firewall is active."
@@ -129,7 +150,11 @@ fi
 #------------------------------------------------------------------------------
 # Log & Display Access Information
 #------------------------------------------------------------------------------
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+SERVER_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || hostname -I | tr ' ' '\n' | head -n 1)
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP="localhost"
+    log "Warning: Could not detect server IP. Using 'localhost' for access URL."
+fi
 ACCESS_URL="https://${SERVER_IP}:${WEBSERVER_PORT}/"
 
 cat <<EOF | tee "$INFO_FILE"
@@ -140,7 +165,7 @@ cat <<EOF | tee "$INFO_FILE"
 
 Date:          $DATE_NOW
 Server:        $(hostname)
-Ubuntu:        $(lsb_release -ds)
+Ubuntu:        $(lsb_release -ds 2>/dev/null || echo "Unknown")
 Webmin Port:   $WEBSERVER_PORT
 Access URL:    $ACCESS_URL
 Username:      root
