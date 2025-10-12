@@ -122,7 +122,7 @@ elif echo "$update_output" | grep -iq "NO_PUBKEY\|signature.*invalid\|not signed
     log "Error: GPG verification failed. Falling back to official Webmin setup script..."
     # Fallback: Use official Webmin setup script
     cd /tmp
-    if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh -y; then
+    if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
         log "Official setup script succeeded. Proceeding with Webmin installation."
     else
         log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com/docs/modules/repository/."
