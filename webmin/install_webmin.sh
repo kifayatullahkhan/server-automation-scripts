@@ -4,12 +4,13 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.7.0
+#  Version: 1.8.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
 #    and logs installation details. Updated for 2025 Webmin developers key
-#    (RSA-4096) and Ubuntu 24.10+ compatibility. Optimized for curl-based execution.
+#    (RSA-4096), Ubuntu 24.10+ compatibility, and robust apt-get update handling.
+#    Optimized for curl-based execution with real-time output.
 #===============================================================================
 
 set -euo pipefail
@@ -54,12 +55,13 @@ if [[ ! "$UBUNTU_VERSION" =~ ^(22|24|25)\.[0-9]+$ ]]; then
 fi
 
 #------------------------------------------------------------------------------
-# Cleanup Stale Webmin Config
+# Cleanup Stale Webmin Config and APT Cache
 #------------------------------------------------------------------------------
 log "Cleaning up any existing Webmin repository or key files..."
 rm -f /etc/apt/sources.list.d/webmin.list
 rm -f /etc/apt/keyrings/webmin.gpg
 rm -f /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
+rm -rf /var/lib/apt/lists/*webmin*
 
 #------------------------------------------------------------------------------
 # Install Prerequisites
@@ -113,24 +115,36 @@ chmod 644 /etc/apt/keyrings/webmin.gpg
 echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
 chmod 644 /etc/apt/sources.list.d/webmin.list
 
-# Update repo and verify
+# Update repo with retry (max 3 attempts)
 log "Running apt-get update for Webmin repository..."
-update_output=$(apt-get update -y 2>&1 | tee -a "$LOG_FILE")
-if echo "$update_output" | grep -q "webmin.*Hit\|Get.*webmin"; then
-    log "Webmin repository detected successfully."
-elif echo "$update_output" | grep -iq "NO_PUBKEY\|signature.*invalid\|not signed"; then
-    log "Error: GPG verification failed. Falling back to official Webmin setup script..."
-    # Fallback: Use official Webmin setup script
-    cd /tmp
-    if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
-        log "Official setup script succeeded. Proceeding with Webmin installation."
+attempt=1
+max_attempts=3
+while [ $attempt -le $max_attempts ]; do
+    log "Attempt $attempt of $max_attempts: Updating APT with Webmin repository..."
+    if timeout 60 apt-get update -y 2>&1 | tee -a "$LOG_FILE" | grep -q "webmin.*Hit\|Get.*webmin"; then
+        log "Webmin repository detected successfully."
+        break
+    elif timeout 60 apt-get update -y 2>&1 | tee -a "$LOG_FILE" | grep -iq "NO_PUBKEY\|signature.*invalid\|not signed"; then
+        log "Error: GPG verification failed. Falling back to official Webmin setup script..."
+        cd /tmp
+        if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
+            log "Official setup script succeeded. Proceeding with Webmin installation."
+            break
+        else
+            log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com/docs/modules/repository/."
+            exit 1
+        fi
     else
-        log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com/docs/modules/repository/."
-        exit 1
+        log "Warning: Could not verify Webmin repo on attempt $attempt."
+        if [ $attempt -eq $max_attempts ]; then
+            log "Error: Failed to update APT with Webmin repo after $max_attempts attempts. Check network or https://download.webmin.com."
+            exit 1
+        fi
+        rm -rf /var/lib/apt/lists/*webmin*
+        sleep 2
     fi
-else
-    log "Warning: Could not fully verify Webmin repo. Continuing cautiously..."
-fi
+    ((attempt++))
+done
 
 # Install Webmin
 log "Installing Webmin..."
