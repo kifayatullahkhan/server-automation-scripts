@@ -4,12 +4,12 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.5.0
+#  Version: 1.6.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
 #    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
-#    and logs installation details. Fixed DSA-1024 weak key issue on Ubuntu 24.10+.
-#    Optimized for curl-based execution with real-time terminal output.
+#    and logs installation details. Fixed DSA-1024 weak key issue on Ubuntu 24.10+
+#    with cleanup and reordered key/repo setup for curl-based execution.
 #===============================================================================
 
 set -euo pipefail
@@ -54,24 +54,27 @@ if [[ ! "$UBUNTU_VERSION" =~ ^(22|24|25)\.[0-9]+$ ]]; then
 fi
 
 #------------------------------------------------------------------------------
-# Initial Update (Before Adding Webmin Repo)
+# Cleanup Stale Webmin Config
 #------------------------------------------------------------------------------
-log "Running initial apt-get update (before Webmin repo)..."
-apt-get update -y 2>&1 | tee -a "$LOG_FILE"
+log "Cleaning up any existing Webmin repository or key files..."
+rm -f /etc/apt/sources.list.d/webmin.list
+rm -f /etc/apt/keyrings/webmin.gpg
+rm -f /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
 
 #------------------------------------------------------------------------------
 # Install Prerequisites
 #------------------------------------------------------------------------------
 log "Installing prerequisite packages..."
+apt-get update -y 2>&1 | tee -a "$LOG_FILE"
 apt-get install -y apt-transport-https software-properties-common curl wget gpg perl libnet-ssleay-perl 2>&1 | tee -a "$LOG_FILE"
 
 # Optional: Skip full system upgrade to avoid unintended changes (uncomment to enable)
 # apt-get upgrade -y 2>&1 | tee -a "$LOG_FILE"
 
 #------------------------------------------------------------------------------
-# Add Webmin Repository (Secure Key Handling with DSA Workaround)
+# Add Webmin GPG Key (Before Repository)
 #------------------------------------------------------------------------------
-log "Adding Webmin GPG key and repository..."
+log "Adding Webmin GPG key..."
 
 mkdir -p /etc/apt/keyrings
 chmod 755 /etc/apt/keyrings
@@ -81,7 +84,7 @@ attempt=1
 max_attempts=3
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Downloading Webmin GPG key..."
-    if wget -qO- --tries=2 --timeout=10 https://download.webmin.com/jcameron-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
+    if wget -qO- --tries=2 --timeout=10 https://download.webmin.com/developers-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
         log "Webmin GPG key imported successfully."
         break
     else
@@ -106,19 +109,18 @@ log "GPG key fingerprint verified: $KEY_FINGERPRINT"
 # Set secure permissions for keyring
 chmod 644 /etc/apt/keyrings/webmin.gpg
 
-# Create Webmin APT source list
-echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
-chmod 644 /etc/apt/sources.list.d/webmin.list
-
-# Workaround for DSA-1024 weak algorithm on Ubuntu 24.10+: Allow it only for this key
+# Apply DSA-1024 workaround for Ubuntu 24.10+
 if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
     log "Applying DSA-1024 allowance for Webmin key..."
-    mkdir -p /etc/apt/keyrings
     cat > /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf <<EOF
 APT::Key::Assert-Pubkey-Algo "dsa1024=$EXPECTED_KEY_FINGERPRINT";
 EOF
     chmod 644 /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
 fi
+
+# Create Webmin APT source list (after key import)
+echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
+chmod 644 /etc/apt/sources.list.d/webmin.list
 
 # Update repo and verify
 log "Running apt-get update for Webmin repository..."
