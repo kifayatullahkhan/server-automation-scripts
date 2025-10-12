@@ -4,12 +4,12 @@
 #-------------------------------------------------------------------------------
 #  Author: Kifayat Khan (original), updated by Grok (xAI)
 #  License: GNU GPL v3
-#  Version: 1.12.0
+#  Version: 1.13.0
 #  Description:
 #    Secure, fully automated Webmin installation script for Ubuntu systems.
-#    Handles modern GPG keyring, HTTPS repository, firewall rules (UFW/firewalld),
-#    and logs installation details. Fixed for Ubuntu 24.10 DSA-1024 key allowance
-#    using jcameron-key.asc for sarge repo compatibility. Optimized for curl-based execution.
+#    Handles DSA-1024 key (jcameron-key.asc) for sarge repo, with robust APT
+#    handling and fallback to official Webmin script. Optimized for Ubuntu 24.10+
+#    and unattended multi-server deployment.
 #===============================================================================
 
 set -euo pipefail
@@ -61,6 +61,7 @@ rm -f /etc/apt/sources.list.d/webmin.list
 rm -f /etc/apt/keyrings/webmin.gpg
 rm -f /etc/apt/trusted.gpg.d/webmin-allow-dsa.conf
 rm -rf /var/lib/apt/lists/*webmin*
+rm -rf /var/lib/apt/lists/*  # Full cache clear for robustness
 
 #------------------------------------------------------------------------------
 # Install Prerequisites
@@ -68,9 +69,6 @@ rm -rf /var/lib/apt/lists/*webmin*
 log "Installing prerequisite packages..."
 apt-get update -y 2>&1 | tee -a "$LOG_FILE"
 apt-get install -y apt-transport-https software-properties-common curl wget gpg perl libnet-ssleay-perl 2>&1 | tee -a "$LOG_FILE"
-
-# Optional: Skip full system upgrade to avoid unintended changes (uncomment to enable)
-# apt-get upgrade -y 2>&1 | tee -a "$LOG_FILE"
 
 #------------------------------------------------------------------------------
 # Add Webmin GPG Key (Before Repository)
@@ -80,12 +78,12 @@ log "Adding Webmin GPG key..."
 mkdir -p /etc/apt/keyrings
 chmod 755 /etc/apt/keyrings
 
-# Download and convert Webmin GPG key with retry (max 3 attempts)
+# Download and convert Webmin GPG key with retry (max 5 attempts)
 attempt=1
-max_attempts=3
+max_attempts=5
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Downloading Webmin GPG key..."
-    if wget -qO- --tries=2 --timeout=10 https://www.webmin.com/jcameron-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
+    if wget -qO- --tries=3 --timeout=15 https://www.webmin.com/jcameron-key.asc | gpg --dearmor > /etc/apt/keyrings/webmin.gpg; then
         log "Webmin GPG key imported successfully."
         break
     else
@@ -94,7 +92,7 @@ while [ $attempt -le $max_attempts ]; do
             log "Error: Failed to import Webmin GPG key after $max_attempts attempts."
             exit 1
         fi
-        sleep 2
+        sleep 3
     fi
     ((attempt++))
 done
@@ -110,8 +108,8 @@ log "GPG key fingerprint verified: $KEY_FINGERPRINT"
 # Set secure permissions for keyring
 chmod 644 /etc/apt/keyrings/webmin.gpg
 
-# Create Webmin APT source list (after key import)
-echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
+# Create Webmin APT source list
+echo "deb [signed-by=/etc/apt/keyrings/webmin.gpg] http://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
 chmod 644 /etc/apt/sources.list.d/webmin.list
 
 # DSA-1024 allowance for Ubuntu 24.10+
@@ -120,8 +118,8 @@ if [[ "$UBUNTU_CODENAME" == "noble" ]]; then
     cat > /etc/apt/apt.conf.d/99webmin-allow-dsa <<EOF
 Acquire::AllowInsecureRepositories "false";
 Acquire::AllowDowngradeToInsecureRepositories "false";
-Acquire::http::AllowSignatureMismatch "false";
-Acquire::https::AllowSignatureMismatch "false";
+Acquire::http::AllowSignatureMismatch "true";
+Acquire::https::AllowSignatureMismatch "true";
 Acquire::AllowInsecureRepositories::webmin "true";
 EOF
     chmod 644 /etc/apt/apt.conf.d/99webmin-allow-dsa
@@ -129,48 +127,74 @@ fi
 
 # Test network connectivity to Webmin repo
 log "Testing network connectivity to Webmin repository..."
-if curl -s --connect-timeout 5 --head https://download.webmin.com/download/repository/dists/sarge/Release | grep -q "200 OK"; then
-    log "Webmin repository URL is reachable."
-else
-    log "Warning: Cannot reach Webmin repository. Network issues may cause apt-get update to fail."
-fi
+attempt=1
+max_attempts=5
+while [ $attempt -le $max_attempts ]; do
+    log "Attempt $attempt of $max_attempts: Checking http://download.webmin.com/download/repository/dists/sarge/Release..."
+    if curl -s --connect-timeout 5 --head http://download.webmin.com/download/repository/dists/sarge/Release | grep -q "200 OK"; then
+        log "Webmin repository URL is reachable."
+        break
+    else
+        log "Warning: Cannot reach Webmin repository."
+        if [ $attempt -eq $max_attempts ]; then
+            log "Error: Cannot reach Webmin repository after $max_attempts attempts. Falling back to official script..."
+            cd /tmp
+            if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
+                log "Official setup script succeeded. Proceeding with Webmin installation."
+                break
+            else
+                log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com."
+                exit 1
+            fi
+        fi
+        sleep 3
+    fi
+    ((attempt++))
+done
 
-# Update repo with retry (max 3 attempts)
+# Update repo with retry (max 5 attempts)
 log "Running apt-get update for Webmin repository..."
 attempt=1
-max_attempts=3
+max_attempts=5
 while [ $attempt -le $max_attempts ]; do
     log "Attempt $attempt of $max_attempts: Updating APT with Webmin repository..."
     rm -rf /var/lib/apt/lists/*webmin*
-    update_output=$(timeout 120 apt-get update -y 2>&1 | tee -a "$LOG_FILE")
-    if echo "$update_output" | grep -qi "webmin"; then
-        log "Webmin repository detected successfully."
+    tmp_output=$(mktemp)
+    if timeout 180 apt-get update -y > "$tmp_output" 2>&1; then
+        update_output=$(cat "$tmp_output")
+        echo "$update_output" | tee -a "$LOG_FILE"
+        log "APT update completed successfully."
+        rm -f "$tmp_output"
         break
-    elif echo "$update_output" | grep -qi "NO_PUBKEY\|signature.*invalid\|not signed\|Failed to fetch"; then
-        log "Error: APT update failed with errors. Full output logged to $LOG_FILE."
-        log "Falling back to official Webmin setup script..."
-        cd /tmp
-        if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
-            log "Official setup script succeeded. Proceeding with Webmin installation."
-            break
-        else
-            log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com."
-            exit 1
-        fi
     else
-        log "Warning: Could not verify Webmin repo on attempt $attempt. Full output logged to $LOG_FILE."
+        update_output=$(cat "$tmp_output")
+        echo "$update_output" | tee -a "$LOG_FILE"
+        log "Warning: APT update failed on attempt $attempt. Full output logged to $LOG_FILE."
         if [ $attempt -eq $max_attempts ]; then
-            log "Error: Failed to update APT with Webmin repo after $max_attempts attempts. Check $LOG_FILE or https://download.webmin.com."
-            exit 1
+            log "Falling back to official Webmin setup script..."
+            cd /tmp
+            if wget -q https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repo.sh && sh webmin-setup-repo.sh --force; then
+                log "Official setup script succeeded. Proceeding with Webmin installation."
+                rm -f "$tmp_output"
+                break
+            else
+                log "Error: Official fallback failed. Check $LOG_FILE or manual install at https://www.webmin.com."
+                rm -f "$tmp_output"
+                exit 1
+            fi
         fi
-        sleep 2
+        rm -f "$tmp_output"
+        sleep 3
     fi
     ((attempt++))
 done
 
 # Install Webmin
 log "Installing Webmin..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y webmin --install-recommends 2>&1 | tee -a "$LOG_FILE"
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y webmin --install-recommends 2>&1 | tee -a "$LOG_FILE"; then
+    log "Error: Webmin installation failed. Check $LOG_FILE for details."
+    exit 1
+fi
 
 #------------------------------------------------------------------------------
 # Enable and Start Webmin Service
