@@ -2,7 +2,7 @@
 #===============================================================================
 #  Webmin Unattended Installer for Ubuntu 22 / 24 / 25
 #-------------------------------------------------------------------------------
-#  Author: Kifayat Khan (original), updated by Grok (xAI)
+#  Author: Kifayat Khan (original)
 #  License: GNU GPL v3
 #  Version: 1.13.0
 #  Description:
